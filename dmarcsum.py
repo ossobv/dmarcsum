@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+import gzip
 import os
 import sys
 import warnings
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from email import message_from_binary_file
+from mimetypes import guess_type
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from progressbar import ProgressBar
 
@@ -14,6 +18,35 @@ class WARN(UserWarning):
 
 def warn(message):
     warnings.warn(message, category=WARN, stacklevel=2)
+
+
+def sudo_chown(file):
+    uid, gid = os.environ.get('SUDO_UID'), os.environ.get('SUDO_GID')
+    if uid is None or gid is None:
+        return
+    if hasattr(file, 'fileno'):
+        os.fchown(file.fileno(), int(uid), int(gid))
+    elif isinstance(file, int):
+        os.fchown(file, int(uid), int(gid))
+    else:
+        os.chown(file, int(uid), int(gid))
+
+
+def zip_open_the_only_file(filename):
+    # Closing the containing zipfile appears to work.
+    with ZipFile(filename, 'r') as zipped:
+        contents = zipped.namelist()
+        assert len(contents) == 1, contents
+        fp = zipped.open(contents[0])
+    return fp
+
+
+def temp_filename(filename):
+    try:
+        dir_, base = filename.rsplit('/', 1)
+    except ValueError:
+        dir_, base = '.', filename
+    return f'{dir_}/.{base}.tmp'
 
 
 class EmailWrapper:
@@ -110,6 +143,9 @@ class MailExtractor:
         'application/x-zip-compressed',
         'application/octet-stream',
     ]
+    MIME_GZIP = ['application/gzip', 'application/x-gzip']
+    MIME_ZIP = ['application/zip', 'application/x-zip-compressed']
+    MIME_TRASH = ['application/octet-stream', 'text/xml']
 
     @classmethod
     def split_attachment_filename(cls, filename):
@@ -181,6 +217,7 @@ class MailExtractor:
         """
         if not os.path.isdir(dest_dirname):
             os.makedirs(dest_dirname)
+            sudo_chown(dest_dirname)
 
         self._dest_dirname = dest_dirname
 
@@ -188,22 +225,42 @@ class MailExtractor:
         """
         Takes an EmailWrapper and saves the relevant attachments
         """
-        print('\n', email, '\n')
+        # Write attachments.
         msg = email.parsed
+        files_written = []
         if msg.is_multipart():
             for attach in msg.get_payload():
                 if attach.get_content_type() in self.ACCEPTED_MIME:
-                    self.save_attachment(email, attach)
+                    files_written.append(self.save_attachment(email, attach))
         else:
-            self.save_attachment(email, msg)
-        # XXX: assert that we saved at least one thing...
+            files_written.append(self.save_attachment(email, msg))
+
+        assert files_written, (email, 'expected at least one attachment')
+
+        # Do a pass on the written attachments, doing any necessary unzip work.
+        keep = set()
+        try:
+            for filename in files_written[:]:  # copy, because we mutate it
+                new_filename = self.unpack_attachment(email, filename)
+                files_written.append(new_filename)
+                keep.add(new_filename)
+        except Exception:
+            # Clean up everything. Let user restart processing from zero.
+            warn(f'Cleaning all {files_written}')
+            for filename in files_written:
+                os.unlink(filename)
+            raise
+
+        # Remove zipped/source files.
+        for filename in files_written:
+            if filename not in keep:
+                os.unlink(filename)
 
     def save_attachment(self, email, attachment):
         attach_name = attachment.get_filename()
         if not attach_name:
-            # Maybe there is a duplicate header? We've seen this in various
-            # mails. (XXX: from whom?)
-            print('XXX content-disposition hack', email.get_header('From'))
+            # Maybe there is a duplicate header? We've seen this in
+            # mails from 'no-reply@*.mimecastreport.com'.
             attachment._headers = [
                 (k, v) for k, v in attachment._headers
                 if not (k == 'Content-Disposition' and v == 'attachment')]
@@ -214,12 +271,57 @@ class MailExtractor:
         assert not attach_name.startswith('.'), (email, attach_name)
         basename = self.join_attachment_filename(email.staticname, attach_name)
         dest = os.path.join(self._dest_dirname, basename)
+
         with open(dest, 'xb') as fp:  # exclusive write, fail if exists
+            sudo_chown(fp)
             fp.write(attachment.get_payload(decode=True))
         os.utime(dest, (email.mtime, email.mtime))
 
-        # XXX: here it's time for the extract blob step..
-        #print('WROTE', dest)
+        return dest
+
+    def unpack_attachment(self, email, filename):
+        if filename.endswith('.xml'):
+            new_filename = filename
+        elif filename.endswith(('.xml.gz', '.xml.zip')):
+            new_filename = filename.rsplit('.', 1)[0]
+        elif (filename.endswith(('.zip'),) and
+                len(filename.rsplit('.', 2)[-2]) > 5):  # no .suffix.suffix
+            new_filename = f'{filename.rsplit(".", 1)[0]}.xml'
+        else:
+            assert False, ('unexpected filename', email, filename)
+        tmp_filename = temp_filename(new_filename)
+
+        fp = None
+        mime, encoding = guess_type(filename)
+        assert mime, (email, filename, mime, encoding)
+
+        if encoding == 'gzip' or mime in self.MIME_GZIP:
+            fp = gzip.open(filename, 'rb')
+        elif mime in self.MIME_ZIP:
+            fp = zip_open_the_only_file(filename)
+        elif mime in self.MIME_TRASH:
+            try:
+                fp = zip_open_the_only_file(filename)
+            except BadZipFile:
+                fp = gzip.open(filename, 'rb')
+        else:
+            assert False, (email, filename, mime, encoding)
+
+        try:
+            # Somewhat expensive. But a good check..
+            dom = ElementTree.parse(fp)
+        finally:
+            fp.close()
+
+        with open(tmp_filename, 'wb') as fp:
+            sudo_chown(fp)
+            dom.write(
+                fp, encoding='utf-8', xml_declaration=True,
+                short_empty_elements=False)
+        os.utime(tmp_filename, (email.mtime, email.mtime))
+
+        os.rename(tmp_filename, new_filename)
+        return new_filename
 
 
 def run_extract(mail_dirname, dest_dirname, toaddr):
@@ -259,7 +361,6 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
     for fp in extractor.find_in_maildir(
             mail_dirname, is_candidate=is_candidate):
         extractor.extract(fp)
-        #pass
 
 
 def formatwarning(message, category, filename, lineno, line=None):
