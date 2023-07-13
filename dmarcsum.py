@@ -4,9 +4,13 @@ import os
 import sys
 import warnings
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
+from collections import namedtuple
+from datetime import datetime
 from email import message_from_binary_file
+from ipaddress import ip_network
 from mimetypes import guess_type
 from xml.etree import ElementTree
+from yaml import safe_load
 from zipfile import BadZipFile, ZipFile
 
 from progressbar import ProgressBar
@@ -196,6 +200,9 @@ class MailExtractor:
             return (b'dmarcreports@example.com' in email.get_header('To'))
         """
         filenames = os.listdir(mail_dirname)
+        filenames.sort()
+        # TODO: disable progressbar if stdout is not a tty?
+        # TODO: reconsider where to place this. this is not the right place..
         bar = ProgressBar(maxval=len(filenames)).start()
 
         for idx, f in enumerate(filenames, 1):
@@ -225,8 +232,19 @@ class MailExtractor:
         """
         Takes an EmailWrapper and saves the relevant attachments
         """
-        # Write attachments.
         msg = email.parsed
+
+        # Check _some_ credentials on the mails.
+        # Should validate DKIM here..
+        # received_spf = msg['received-spf']  # gets the topmost one (right?)
+        # if received_spf.startswith('Pass '):
+        #     pass
+        # elif received_spf.startswith('None '):
+        #     warn(f'no SPF configured for {email.filename!r}')
+        # else:
+        #     assert False, (email, msg['received-spf'])
+
+        # Write attachments.
         files_written = []
         if msg.is_multipart():
             for attach in msg.get_payload():
@@ -324,6 +342,245 @@ class MailExtractor:
         return new_filename
 
 
+class ReportOrg(namedtuple('ReportOrg', 'org_suffix email_suffix')):
+    @classmethod
+    def from_report_dom(cls, report_dom):
+        org_suffix = report_dom.findtext('report_metadata/org_name')
+        if '.' in org_suffix and len(org_suffix.split('.', 2)) > 2:
+            org_suffix = '...' + '.'.join(org_suffix.rsplit('.', 2)[-2:])
+
+        email_suffix = report_dom.findtext('report_metadata/email')
+        email_suffix = email_suffix.rsplit('@', 1)[-1]
+        email_suffix = '...' + '.'.join(email_suffix.rsplit('.', 2)[-2:])
+        return cls(org_suffix=org_suffix, email_suffix=email_suffix)
+
+
+class ReportRecord(namedtuple('RecordRecord', (
+        'source_file source_record org period_begin period_end count '
+        'source_ip env_from env_to hdr_from dkim spf'))):
+    @classmethod
+    def from_report_dom(cls, report, record_idx, dom_record):
+        dkim_ok = dom_record.findtext('row/policy_evaluated/dkim')
+        assert dkim_ok in ('pass', 'fail'), (report.name, dkim_ok)
+        dkim_ok = (dkim_ok == 'pass')
+
+        spf_ok = dom_record.findtext('row/policy_evaluated/spf')
+        assert spf_ok in ('pass', 'fail'), (report.name, spf_ok)
+        spf_ok = (spf_ok == 'pass')
+
+        source_ip = dom_record.findtext('row/source_ip')
+        assert source_ip, (report.name, source_ip)
+
+        count = int(dom_record.findtext('row/count'))
+        assert count > 0, (report.name, count)
+
+        # Not sure when envelope_from is set. Various reports do not
+        # include this. We'll mark the env_from as '*' for now.
+        # For the empty env_from, we'll assume '<>'. Not sure if this is
+        # correct.
+        env_from = dom_record.findtext('identifiers/envelope_from')
+        if env_from == '':
+            env_from = '<>'
+        elif env_from is None:
+            env_from = '*'  # we don't know
+
+        env_to = dom_record.findtext('identifiers/envelope_to')
+        hdr_from = dom_record.findtext('identifiers/header_from')
+        # XXX: assert hdr_from == report.domain, (hdr_from, report.domain)
+
+        return cls(
+            source_file=report.name,
+            source_record=record_idx,
+            org=report.org,
+            period_begin=report.period_begin,
+            period_end=report.period_end,
+            count=count,
+            source_ip=source_ip,
+            env_from=env_from,
+            env_to=env_to,
+            hdr_from=hdr_from,
+            dkim=dkim_ok,
+            spf=spf_ok,
+        )
+
+    # TODO: improve repr()/str() output by a lot..
+
+
+class Report:
+    @classmethod
+    def from_filename(cls, filename):
+        with open(filename, 'rb') as fp:
+            dom = ElementTree.parse(fp)
+        return cls(dom, name=os.path.basename(filename))
+
+    def __init__(self, dom, name):
+        self._dom = dom
+        self.name = name
+        self.org = ReportOrg.from_report_dom(dom)
+        self.domain = dom.findtext('policy_published/domain')
+        assert self.domain, (name, self.domain)
+        self._period_begin = None
+        self._period_end = None
+
+    @property
+    def period_begin(self):
+        if self._period_begin is None:
+            self._period_begin = datetime.fromtimestamp(int(
+                self._dom.findtext('report_metadata/date_range/begin')))
+        return self._period_begin
+
+    @property
+    def period_end(self):
+        if self._period_end is None:
+            self._period_end = datetime.fromtimestamp(int(
+                self._dom.findtext('report_metadata/date_range/end')))
+        return self._period_end
+
+    def get_records(self):
+        records = self._dom.findall('record')
+
+        for idx, record in enumerate(records):
+            record = ReportRecord.from_report_dom(self, idx, record)
+            yield record
+
+
+class ReportSummary:
+    def __init__(self):
+        self._period_begin = datetime(2038, 1, 1)
+        self._period_end = datetime(1970, 1, 1)
+        self._domain = None
+        self._records = []
+        self._by_org = dict()
+        self._by_source_ip = dict()
+        self._by_known_ip = dict()
+        self._by_env_from = dict()
+        self._by_hdr_from = dict()
+        self._known_ips = {}
+        self._both_good_counts = 0
+        self._dkim_good_counts = 0
+        self._spf_good_counts = 0
+        self._both_bad_counts = 0
+        self._both_good = []
+        self._dkim_good = []
+        self._spf_good = []
+        self._both_bad = []
+
+    def set_known_ips(self, dict_with_lists):
+        self._known_ips = {}
+        for key, nets in dict_with_lists.items():
+            if key:  # skip the empty key
+                for net in nets:
+                    net = ip_network(net)
+                    self._known_ips[net] = key
+
+    def get_known_ip(self, ip):
+        net = ip_network(ip)
+        for possible_net in self._known_ips.keys():
+            if (net.__class__ == possible_net.__class__ and
+                    net.subnet_of(possible_net)):
+                return self._known_ips[possible_net]  # "name"
+        return ''
+
+    def add(self, report, args):
+        # We only expect to handle a single domain at the moment.
+        if self._domain != report.domain:
+            assert self._domain is None, (self._domain, report.domain)
+            self._domain = report.domain
+
+        added = []
+        for record in report.get_records():
+            if self._maybe_add_record(record, args):
+                added.append(record)
+
+        if not added:
+            return
+
+        # Add to global lists.
+        try:
+            self._by_org[report.org].extend(added)
+        except KeyError:
+            self._by_org[report.org] = added
+
+        self._period_begin = min(report.period_begin, self._period_begin)
+        self._period_end = max(report.period_end, self._period_end)
+
+    def _maybe_add_record(self, record, args):
+        if args.dkim is not None:
+            if record.dkim is not args.dkim:
+                return False
+        if args.spf is not None:
+            if record.spf is not args.spf:
+                return False
+
+        known_ip = self.get_known_ip(record.source_ip)
+        if args.source_ip and args.source_ip not in (
+                known_ip, record.source_ip):
+            return False
+
+        self._records.append(record)
+
+        if record.dkim is record.spf is True:
+            self._both_good_counts += record.count
+            self._both_good.append(record)
+        elif record.dkim:
+            self._dkim_good_counts += record.count
+            self._dkim_good.append(record)
+        elif record.spf:
+            self._spf_good_counts += record.count
+            self._spf_good.append(record)
+        else:
+            self._both_bad_counts += record.count
+            self._both_bad.append(record)
+
+        try:
+            self._by_source_ip[record.source_ip].append(record)
+        except KeyError:
+            self._by_source_ip[record.source_ip] = [record]
+
+        try:
+            self._by_known_ip[known_ip].append(record)
+        except KeyError:
+            self._by_known_ip[known_ip] = [record]
+
+        try:
+            self._by_env_from[record.env_from].append(record)
+        except KeyError:
+            self._by_env_from[record.env_from] = [record]
+
+        try:
+            self._by_hdr_from[record.hdr_from].append(record)
+        except KeyError:
+            self._by_hdr_from[record.hdr_from] = [record]
+
+        return True
+
+    def print_summary(self):
+        def print_dict(title, d):
+            print(title)
+            for idx, (name, items) in enumerate(
+                    sorted(d.items(), key=(
+                        lambda kv: (-len(kv[1]), kv[0])))):
+                print(f'- {len(items):6d}  {name}')
+                if idx >= 15:
+                    print('- ...')
+                    break
+            print()
+
+        print(f'Dates: {self._period_begin} .. {self._period_end}')
+        print(f'Records: {len(self._records)}')
+        print(f'DKIM&SPF:   {len(self._both_good)} ({self._both_good_counts})')
+        print(f'DKIM&!SPF:  {len(self._dkim_good)} ({self._dkim_good_counts})')
+        print(f'!DKIM&SPF:  {len(self._spf_good)} ({self._spf_good_counts})')
+        print(f'!DKIM&!SPF: {len(self._both_bad)} ({self._both_bad_counts})')
+        print()
+
+        print_dict('By organisation:', self._by_org)
+        print_dict('By source_ip:', self._by_source_ip)
+        print_dict('By known_ip:', self._by_known_ip)
+        print_dict('By env_from:', self._by_env_from)
+        print_dict('By hdr_from:', self._by_hdr_from)
+
+
 def run_extract(mail_dirname, dest_dirname, toaddr):
     extractor = MailExtractor(dest_dirname)
 
@@ -337,7 +594,7 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
             return False
 
         if 1:  # v-- cheap
-            # XXX: improve to-addr matching without making it expensive
+            # TODO: improve to-addr matching without making it expensive
             to = email.get_header('To')
             if to is None or not to.strip():
                 warn(f'{email.filename!r} has no To header')
@@ -363,6 +620,46 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
         extractor.extract(fp)
 
 
+def _make_summary(report_dirname, args):
+    filenames = os.listdir(report_dirname)
+    filenames.sort()
+
+    summary = ReportSummary()
+
+    if args.known_ips:
+        with open(args.known_ips) as fp:
+            summary.set_known_ips(safe_load(fp)['known_ips'])
+
+    print('Summarizing:')
+    # TODO: disable progressbar if stdout is not a tty?
+    bar = ProgressBar(maxval=len(filenames)).start()
+    bar.start()
+
+    for idx, filename in enumerate(filenames, 1):
+        report = Report.from_filename(os.path.join(report_dirname, filename))
+        if args.since and report.period_end < args.since:
+            pass
+        elif args.until and report.period_begin >= args.until:
+            pass
+        else:
+            summary.add(report, args)
+        bar.update(idx)
+    bar.finish()
+
+    return summary
+
+
+def run_dump(report_dirname, args):
+    summary = _make_summary(report_dirname, args)
+    for record in summary._records:
+        print(record)
+
+
+def run_summary(report_dirname, args):
+    summary = _make_summary(report_dirname, args)
+    summary.print_summary()
+
+
 def formatwarning(message, category, filename, lineno, line=None):
     """
     Override default Warning layout, from:
@@ -386,29 +683,55 @@ def formatwarning(message, category, filename, lineno, line=None):
 warnings.formatwarning = formatwarning  # noqa
 
 
+def parse_date(s):
+    return datetime(*[int(i) for i in s.split('-')])
+
+
+def parse_passfail(s):
+    assert s in ('pass', 'fail'), s
+    return s == 'pass'
+
+
 def main():
     parser = ArgumentParser(
         formatter_class=RawDescriptionHelpFormatter,
         description='''\
-Summarize DMARC reports. This is a three step process:
+Summarize DMARC reports. This is a two step process:
+
+First the XML should be fetched from Maildir storage (local IMAP?).
+Then the XML can be read and summarized or dumped to stdout.
 
 - extract: get the reports from a Maildir, requires
   DMARC_MAILDIR, DMARC_TOADDR, DMARC_REPORTDIR
-- parse: read the reports from DMARC_REPORTDIR, writes to sqlite
-- summary: write a summary
+- summary: read the reports fromm DMARC_REPORTDIR, print summary
+- dump: read the reports from DMARC_REPORTDIR, output all records
 ''')
     subparsers = parser.add_subparsers(dest='command', help='command help')
+
     parser_extract = subparsers.add_parser(
         'extract', help='Extract files from Maildir')
-    parser_parse = subparsers.add_parser(
-        'parse', help='Parse DMARC XML reports')
+    (parser_extract,)  # touch for PEP
+    parser_dump = subparsers.add_parser(
+        'dump', help='Parse DMARC XML reports and dump listing')
     parser_summary = subparsers.add_parser(
-        'summary', help='Generate summary')
-    (parser_extract, parser_parse, parser_summary)  # touch for PEP
+        'summary', help='Parse DMARC XML reports and show summary')
+
+    for command_that_parses in (parser_dump, parser_summary):
+        command_that_parses.add_argument('-S', '--since', type=parse_date)
+        command_that_parses.add_argument('-U', '--until', type=parse_date)
+        command_that_parses.add_argument('--dkim', type=parse_passfail)
+        command_that_parses.add_argument('--spf', type=parse_passfail)
+        # TODO: add more filters? --header-from? --domain? --env-from?
+        # TODO: split up known-ip from source-ip. Allow multiple source-ip?
+        command_that_parses.add_argument('--source-ip', type=str)  # str?
+        # YAML with 'known_ips: {"name": [ip1, ip2, ip3]}'
+        # TODO: this needs documentation
+        command_that_parses.add_argument('--known-ips', type=str)
 
     args = parser.parse_args()
+
     if args.command == 'extract':
-        # FIXME: hardcoded values
+        # FIXME: don't use (only) ENV for these values..
         mail_dirname = os.environ['DMARC_MAILDIR']
         toaddr = os.environ['DMARC_TOADDR']
         dest_dirname = os.environ['DMARC_REPORTDIR']
@@ -416,11 +739,21 @@ Summarize DMARC reports. This is a three step process:
             mail_dirname=mail_dirname, dest_dirname=dest_dirname,
             toaddr=toaddr)
 
+    elif args.command == 'dump':
+        # FIXME: don't use (only) ENV for these values..
+        report_dirname = os.environ['DMARC_REPORTDIR']
+        run_dump(report_dirname=report_dirname, args=args)
+
+    elif args.command == 'summary':
+        # FIXME: don't use (only) ENV for these values..
+        report_dirname = os.environ['DMARC_REPORTDIR']
+        run_summary(report_dirname=report_dirname, args=args)
+
     elif args.command is None:
         parser.print_usage()
 
     else:
-        print('XXX', args)
+        print('FIXME', args)
         exit(1)
 
 
