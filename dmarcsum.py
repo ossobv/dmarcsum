@@ -465,27 +465,40 @@ class Report:
 
 class ReportSummary:
     def __init__(self):
+        class recordlist(list):
+            def __init__(self):
+                super().__init__()
+                self.count = 0
+
+            def append(self, record):
+                super().append(record)
+                self.count += record.count
+
+            def extend(self, records):
+                super().extend(records)
+                self.count += sum(i.count for i in records)
+
+        dict_with_recordlists = (lambda: defaultdict(recordlist))
+
+        self._known_ips = {}
         self._period_begin = datetime(2038, 1, 1)
         self._period_end = datetime(1970, 1, 1)
         self._domain = None
-        self._records = []
-        self._by_org = {}
+
+        self._records = recordlist()
+        self._by_org = dict_with_recordlists()
         self._by_record = {
-            'source-ip': defaultdict(list),
-            'known-ip': defaultdict(list),
-            'env-from': defaultdict(list),
-            'env-to': defaultdict(list),
-            'hdr-from': defaultdict(list),
+            'source-ip': dict_with_recordlists(),
+            'known-ip': dict_with_recordlists(),
+            'env-from': dict_with_recordlists(),
+            'env-to': dict_with_recordlists(),
+            'hdr-from': dict_with_recordlists(),
         }
-        self._known_ips = {}
-        self._both_good_counts = 0
-        self._dkim_good_counts = 0
-        self._spf_good_counts = 0
-        self._both_bad_counts = 0
-        self._both_good = []
-        self._dkim_good = []
-        self._spf_good = []
-        self._both_bad = []
+
+        self._pass_dkim_spf = recordlist()
+        self._pass_dkim = recordlist()
+        self._pass_spf = recordlist()
+        self._fail = recordlist()
 
     def set_known_ips(self, dict_with_lists):
         self._known_ips = {}
@@ -501,7 +514,7 @@ class ReportSummary:
             if (net.__class__ == possible_net.__class__ and
                     net.subnet_of(possible_net)):
                 return self._known_ips[possible_net]  # "name"
-        return ''
+        return None
 
     def add(self, report, args):
         # We only expect to handle a single domain at the moment.
@@ -542,20 +555,17 @@ class ReportSummary:
         self._records.append(record)
 
         if record.dkim is record.spf is True:
-            self._both_good_counts += record.count
-            self._both_good.append(record)
+            self._pass_dkim_spf.append(record)
         elif record.dkim:
-            self._dkim_good_counts += record.count
-            self._dkim_good.append(record)
+            self._pass_dkim.append(record)
         elif record.spf:
-            self._spf_good_counts += record.count
-            self._spf_good.append(record)
+            self._pass_spf.append(record)
         else:
-            self._both_bad_counts += record.count
-            self._both_bad.append(record)
+            self._fail.append(record)
 
         self._by_record['source-ip'][record.source_ip].append(record)
-        self._by_record['known-ip'][known_ip].append(record)
+        if known_ip is not None:
+            self._by_record['known-ip'][known_ip].append(record)
         self._by_record['env-from'][record.env_from].append(record)
         self._by_record['env-to'][record.env_to].append(record)
         self._by_record['hdr-from'][record.hdr_from].append(record)
@@ -566,8 +576,11 @@ class ReportSummary:
             print(title)
             for idx, (name, items) in enumerate(
                     sorted(d.items(), key=(
-                        lambda kv: (-len(kv[1]), kv[0])))):
-                print(f'- {len(items):6d}  {name}')
+                        lambda kv: (-kv[1].count, kv[0])))):
+                # Double check our count code?
+                # > count = sum(record.count for record in items)
+                # > assert count == items.count, (count, items.count)
+                print(f'- {items.count:7d} ({len(items):6d})  {name}')
                 if idx >= 15:
                     print('- ...')
                     break
@@ -575,15 +588,18 @@ class ReportSummary:
 
         print(f'Dates: {self._period_begin} .. {self._period_end}')
         print(f'Records: {len(self._records)}')
-        print(f'DKIM&SPF:   {len(self._both_good)} ({self._both_good_counts})')
-        print(f'DKIM&!SPF:  {len(self._dkim_good)} ({self._dkim_good_counts})')
-        print(f'!DKIM&SPF:  {len(self._spf_good)} ({self._spf_good_counts})')
-        print(f'!DKIM&!SPF: {len(self._both_bad)} ({self._both_bad_counts})')
+        for title, items in (
+                (' DKIM& SPF', self._pass_dkim_spf),
+                (' DKIM&!SPF', self._pass_dkim),
+                ('!DKIM&!SPF', self._pass_spf),
+                ('!DKIM&!SPF', self._fail)):
+            print(f'{title}: {items.count:7d} ({len(items):6d})')
         print()
 
         print_dict('By organisation:', self._by_org)
         for key in ('source-ip', 'known-ip', 'env-from', 'env-to', 'hdr-from'):
-            print_dict(f'By {key}:', self._by_record[key])
+            if self._by_record[key]:
+                print_dict(f'By {key}:', self._by_record[key])
 
 
 def run_extract(mail_dirname, dest_dirname, toaddr):
