@@ -232,34 +232,6 @@ class MailExtractor:
         assert '/' not in attachment_name, (staticname, attachment_name)
         return ','.join([staticname, attachment_name])
 
-    @classmethod
-    def find_in_maildir(cls, mail_dirname, is_candidate=(lambda email: True)):
-        """
-        find /var/mail/example.com/.INBOX/cur -type f | grep -l "To: $to_addr"
-
-        The is_candidate function might look like:
-
-            return (b'dmarcreports@example.com' in email.get_header('To'))
-        """
-        filenames = os.listdir(mail_dirname)
-        filenames.sort()
-        # TODO: disable progressbar if stdout is not a tty?
-        # TODO: reconsider where to place this. this is not the right place..
-        bar = ProgressBar(maxval=len(filenames)).start()
-
-        for idx, f in enumerate(filenames, 1):
-            mail_filename = os.path.join(mail_dirname, f)
-
-            # We don't expect directories here. Nor do we expect files where we
-            # do not have read permissions
-            with open(mail_filename, 'rb') as fp:
-                email = EmailWrapper.from_filename_fp(mail_filename, fp)
-                if is_candidate(email):
-                    yield email
-
-            bar.update(idx)
-        bar.finish()
-
     def __init__(self, dest_dirname):
         """
         Constructor, takes the target dir
@@ -654,10 +626,26 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
         assert toaddr in email.parsed['to'], email.parsed['to']
         return True
 
+    # find /var/mail/example.com/.INBOX/cur -type f | grep -l "To: $to_addr"
+    filenames = os.listdir(mail_dirname)
+    filenames.sort()
+
     print('Extracting:')
-    for fp in extractor.find_in_maildir(
-            mail_dirname, is_candidate=is_candidate):
-        extractor.extract(fp)
+    # TODO: disable progressbar if stdout is not a tty?
+    bar = ProgressBar(maxval=len(filenames)).start()
+
+    for idx, f in enumerate(filenames, 1):
+        mail_filename = os.path.join(mail_dirname, f)
+
+        # We don't expect directories here. Nor do we expect files where we
+        # do not have read permissions
+        with open(mail_filename, 'rb') as fp:
+            email = EmailWrapper.from_filename_fp(mail_filename, fp)
+            if is_candidate(email):
+                extractor.extract(email)
+
+        bar.update(idx)
+    bar.finish()
 
 
 def _make_summary(report_dirname, args):
@@ -673,7 +661,6 @@ def _make_summary(report_dirname, args):
     print('Summarizing:')
     # TODO: disable progressbar if stdout is not a tty?
     bar = ProgressBar(maxval=len(filenames)).start()
-    bar.start()
 
     for idx, filename in enumerate(filenames, 1):
         report = Report.from_filename(os.path.join(report_dirname, filename))
