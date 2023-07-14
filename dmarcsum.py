@@ -8,7 +8,9 @@ from collections import namedtuple
 from datetime import datetime
 from email import message_from_binary_file
 from ipaddress import ip_network
+from io import StringIO
 from mimetypes import guess_type
+from xml.dom import minidom
 from xml.etree import ElementTree
 from yaml import safe_load
 from zipfile import BadZipFile, ZipFile
@@ -51,6 +53,46 @@ def temp_filename(filename):
     except ValueError:
         dir_, base = '.', filename
     return f'{dir_}/.{base}.tmp'
+
+
+def write_xml(outfp, dom):
+    if 1:
+        # Expensive (6x!!) canonical + pretty writing.
+        xml_string = ElementTree.tostring(dom.getroot())
+        scratchpad = StringIO()
+        # Run through canonicalize() to remove the whitespace.
+        ElementTree.canonicalize(
+            xml_data=xml_string, out=scratchpad,
+            with_comments=True, strip_text=True,
+            rewrite_prefixes=False)
+        scratchpad.seek(0)
+        # Run through minidom to add indentation.
+        dom = minidom.parse(scratchpad)
+        scratchpad = StringIO()
+        dom.writexml(
+            scratchpad, indent='', addindent='  ', newl='\n', encoding='utf-8')
+        # Loop over lines and add idx comments. This annotates all but the
+        # first equal 2nd level element, like:
+        #   <record>
+        #   <record><!-- #1 -->
+        #   <record><!-- #2 -->
+        #   ...
+        scratchpad.seek(0)
+        indexes = {}
+        for line in scratchpad:
+            if (line.startswith('  <') and line.endswith('>\n') and
+                    line[3] != '/'):
+                if line in indexes:
+                    indexes[line] += 1
+                    line = f'{line[0:-1]}<!-- #{indexes[line]} -->\n'
+                else:
+                    indexes[line] = 0
+            outfp.write(line)
+    else:
+        # Cheap writing.
+        dom.write(
+            outfp, encoding='unicode', xml_declaration=True,
+            short_empty_elements=False)
 
 
 class EmailWrapper:
@@ -331,11 +373,9 @@ class MailExtractor:
         finally:
             fp.close()
 
-        with open(tmp_filename, 'wb') as fp:
+        with open(tmp_filename, mode='w', encoding='utf-8') as fp:
             sudo_chown(fp)
-            dom.write(
-                fp, encoding='utf-8', xml_declaration=True,
-                short_empty_elements=False)
+            write_xml(fp, dom)
         os.utime(tmp_filename, (email.mtime, email.mtime))
 
         os.rename(tmp_filename, new_filename)
