@@ -4,7 +4,7 @@ import os
 import sys
 import warnings
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from datetime import datetime
 from email import message_from_binary_file
 from ipaddress import ip_network
@@ -397,6 +397,10 @@ class ReportRecord(namedtuple('RecordRecord', (
             env_from = '*'  # we don't know
 
         env_to = dom_record.findtext('identifiers/envelope_to')
+        assert env_to != '*', report
+        if env_to is None:
+            env_to = '*'
+
         hdr_from = dom_record.findtext('identifiers/header_from')
         # XXX: assert hdr_from == report.domain, (hdr_from, report.domain)
 
@@ -465,11 +469,14 @@ class ReportSummary:
         self._period_end = datetime(1970, 1, 1)
         self._domain = None
         self._records = []
-        self._by_org = dict()
-        self._by_source_ip = dict()
-        self._by_known_ip = dict()
-        self._by_env_from = dict()
-        self._by_hdr_from = dict()
+        self._by_org = {}
+        self._by_record = {
+            'source-ip': defaultdict(list),
+            'known-ip': defaultdict(list),
+            'env-from': defaultdict(list),
+            'env-to': defaultdict(list),
+            'hdr-from': defaultdict(list),
+        }
         self._known_ips = {}
         self._both_good_counts = 0
         self._dkim_good_counts = 0
@@ -547,26 +554,11 @@ class ReportSummary:
             self._both_bad_counts += record.count
             self._both_bad.append(record)
 
-        try:
-            self._by_source_ip[record.source_ip].append(record)
-        except KeyError:
-            self._by_source_ip[record.source_ip] = [record]
-
-        try:
-            self._by_known_ip[known_ip].append(record)
-        except KeyError:
-            self._by_known_ip[known_ip] = [record]
-
-        try:
-            self._by_env_from[record.env_from].append(record)
-        except KeyError:
-            self._by_env_from[record.env_from] = [record]
-
-        try:
-            self._by_hdr_from[record.hdr_from].append(record)
-        except KeyError:
-            self._by_hdr_from[record.hdr_from] = [record]
-
+        self._by_record['source-ip'][record.source_ip].append(record)
+        self._by_record['known-ip'][known_ip].append(record)
+        self._by_record['env-from'][record.env_from].append(record)
+        self._by_record['env-to'][record.env_to].append(record)
+        self._by_record['hdr-from'][record.hdr_from].append(record)
         return True
 
     def print_summary(self):
@@ -590,10 +582,8 @@ class ReportSummary:
         print()
 
         print_dict('By organisation:', self._by_org)
-        print_dict('By source_ip:', self._by_source_ip)
-        print_dict('By known_ip:', self._by_known_ip)
-        print_dict('By env_from:', self._by_env_from)
-        print_dict('By hdr_from:', self._by_hdr_from)
+        for key in ('source-ip', 'known-ip', 'env-from', 'env-to', 'hdr-from'):
+            print_dict(f'By {key}:', self._by_record[key])
 
 
 def run_extract(mail_dirname, dest_dirname, toaddr):
