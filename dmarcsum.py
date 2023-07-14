@@ -455,6 +455,9 @@ class Report:
             record = ReportRecord.from_report_dom(self, idx, record)
             yield record
 
+    def __repr__(self):
+        return f'<Report({self.name!r})>'
+
 
 class ReportSummary:
     def __init__(self):
@@ -496,7 +499,7 @@ class ReportSummary:
     def add(self, report, args):
         # We only expect to handle a single domain at the moment.
         if self._domain != report.domain:
-            assert self._domain is None, (self._domain, report.domain)
+            assert self._domain is None, (self._domain, report)
             self._domain = report.domain
 
         added = []
