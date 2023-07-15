@@ -499,7 +499,7 @@ class Report:
 
 
 class ReportSummary:
-    def __init__(self):
+    def __init__(self, domain):
         class recordlist(list):
             def __init__(self):
                 super().__init__()
@@ -518,7 +518,7 @@ class ReportSummary:
         self._known_ips = {}
         self._period_begin = datetime(2038, 1, 1)
         self._period_end = datetime(1970, 1, 1)
-        self._domain = None
+        self._domain = domain
 
         self._records = recordlist()
         self._by_org = dict_with_recordlists()
@@ -553,9 +553,15 @@ class ReportSummary:
 
     def add(self, report, args):
         # We only expect to handle a single domain at the moment.
-        if self._domain != report.domain:
-            assert self._domain is None, (self._domain, report)
-            self._domain = report.domain
+        if self._domain is not None:
+            skip_domain = (report.domain != self._domain)
+        else:
+            skip_domain = False
+        if skip_domain:
+            warn(
+                f'Already set to handle domain {self._domain}: '
+                f'skipping {report.domain} (see --domain option)')
+            return
 
         added = []
         for record in report.get_records():
@@ -564,6 +570,10 @@ class ReportSummary:
 
         if not added:
             return
+
+        if self._domain != report.domain:
+            assert self._domain is None, (self._domain, report)
+            self._domain = report.domain
 
         # Add to global lists.
         try:
@@ -846,6 +856,9 @@ Then the XML can be read and summarized or dumped to stdout.
         command_that_parses.add_argument('-U', '--until', type=parse_date)
         command_that_parses.add_argument('--dkim', type=parse_passfail)
         command_that_parses.add_argument('--spf', type=parse_passfail)
+        command_that_parses.add_argument('--domain', help=(
+            'select specific domain; needed when multiple comains are found '
+            'in the reports'))
         # TODO: add more filters? --header-from? --domain? --env-from?
         # TODO: split up known-ip from source-ip. Allow multiple source-ip?
         command_that_parses.add_argument('--source-ip', type=str)  # str?
