@@ -599,6 +599,7 @@ class ReportSummary:
 
         self._records.append(record)
 
+        # Passed DKIM and SPF or both?
         if record.dkim is record.spf is True:
             self._pass_dkim_spf.append(record)
         elif record.dkim:
@@ -756,22 +757,20 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
     bar.finish()
 
 
-def _make_summary(report_dirname, args):
-    filenames = os.listdir(report_dirname)
+def _make_summary(filenames, args):
     filenames.sort()
+    summary = ReportSummary(domain=args.domain)
 
-    summary = ReportSummary()
-
-    if args.known_ips:
-        with open(args.known_ips) as fp:
+    if args.config:
+        with open(args.config) as fp:
             summary.set_known_ips(safe_load(fp)['known_ips'])
 
-    print('Summarizing:')
+    print('Parsing:')
     # TODO: disable progressbar if stdout is not a tty?
     bar = ProgressBar(maxval=len(filenames)).start()
 
     for idx, filename in enumerate(filenames, 1):
-        report = Report.from_filename(os.path.join(report_dirname, filename))
+        report = Report.from_filename(filename)
         if args.since and report.period_end < args.since:
             pass
         elif args.until and report.period_begin >= args.until:
@@ -784,14 +783,14 @@ def _make_summary(report_dirname, args):
     return summary
 
 
-def run_dump(report_dirname, args):
-    summary = _make_summary(report_dirname, args)
+def run_dump(filenames, args):
+    summary = _make_summary(filenames, args)
     for record in summary._records:
         print(record.as_short())
 
 
-def run_summary(report_dirname, args):
-    summary = _make_summary(report_dirname, args)
+def run_summary(filenames, args):
+    summary = _make_summary(filenames, args)
     summary.print_summary()
 
 
@@ -827,19 +826,57 @@ def parse_passfail(s):
     return s == 'pass'
 
 
+def get_report_filenames(reports):
+    """
+    Reports can be filenames or directory names
+
+    If it is an empty list, reports are found in the DMARC_REPORTDIR. This time
+    must be a directory.
+    """
+    if not reports:
+        reports = [os.environ['DMARC_REPORTDIR']]
+        must_be_directory = True
+    else:
+        must_be_directory = False
+
+    report_filenames = []
+    for report_dirname in reports:
+        try:
+            filenames = os.listdir(report_dirname)
+        except NotADirectoryError:
+            if must_be_directory:
+                raise
+            filenames = [report_dirname]
+        else:
+            filenames = [os.path.join(report_dirname, i) for i in filenames]
+        report_filenames.extend(filenames)
+
+    return report_filenames
+
+
 def main():
     parser = ArgumentParser(
         formatter_class=RawDescriptionHelpFormatter,
         description='''\
-Summarize DMARC reports. This is a two step process:
+DMARC RUA XML multi-analyzer. This is a two step process:
 
-First the XML should be fetched from Maildir storage (local IMAP?).
-Then the XML can be read and summarized or dumped to stdout.
+First, the AFRF XMLs are fetched from Maildir storage (local IMAP?).
+Then, the AFRF XMLs can be read and summarized or dumped to stdout.
 
-- extract: get the reports from a Maildir, requires
-  DMARC_MAILDIR, DMARC_TOADDR, DMARC_REPORTDIR
-- summary: read the reports fromm DMARC_REPORTDIR, print summary
-- dump: read the reports from DMARC_REPORTDIR, output all records
+Commands:
+
+  extract - get the reports from a Maildir, populates the reports dir
+  summary - read the reports from -r supplied file/directory, display summary
+  dump - read the reports from -r supplied file/directory, output all records
+
+Environment variables required by the extract command:
+
+  DMARC_MAILDIR=/var/mail/example.com/jdoe/.DMARC/cur
+  DMARC_TOADDR=jdoe+rua@example.com
+  DMARC_REPORTDIR=./report-example.com
+
+If no -r/--report argument is supplied for the summary/dump commands, the
+DMARC_REPORTDIR is tried.
 ''')
     subparsers = parser.add_subparsers(dest='command', help='command help')
 
@@ -852,19 +889,33 @@ Then the XML can be read and summarized or dumped to stdout.
         'summary', help='Parse DMARC XML reports and show summary')
 
     for command_that_parses in (parser_dump, parser_summary):
-        command_that_parses.add_argument('-S', '--since', type=parse_date)
-        command_that_parses.add_argument('-U', '--until', type=parse_date)
-        command_that_parses.add_argument('--dkim', type=parse_passfail)
-        command_that_parses.add_argument('--spf', type=parse_passfail)
+        command_that_parses.add_argument(
+            '-r', '--report', action='append', help=(
+                'report XML file/directory to read; if none are specified, '
+                'the DMARC_REPORTDIR env is tried'))
+        command_that_parses.add_argument(
+            '--config', type=str, help=(
+                'path to optional configuration YAML; shall contain a '
+                '"known_ips" key with a dictionary of names and IP-networks. '
+                'this list will be consulted to populate the "known-ip" '
+                'field'))
         command_that_parses.add_argument('--domain', help=(
             'select specific domain; needed when multiple comains are found '
             'in the reports'))
+        command_that_parses.add_argument(
+            '-S', '--since', type=parse_date, help='YYYY-MM-DD format')
+        command_that_parses.add_argument(
+            '-U', '--until', type=parse_date, help='YYYY-MM-DD format')
+        command_that_parses.add_argument(
+            '--dkim', choices=('pass', 'fail'), help='only DKIM pass/fail')
+        command_that_parses.add_argument(
+            '--spf', choices=('pass', 'fail'), help='only SPF pass/fail')
         # TODO: add more filters? --header-from? --domain? --env-from?
         # TODO: split up known-ip from source-ip. Allow multiple source-ip?
-        command_that_parses.add_argument('--source-ip', type=str)  # str?
+        command_that_parses.add_argument('--source-ip', type=str, help=(
+            'only this exact source IP (or known-ip)'))  # str?
         # YAML with 'known_ips: {"name": [ip1, ip2, ip3]}'
         # TODO: this needs documentation
-        command_that_parses.add_argument('--known-ips', type=str)
 
     args = parser.parse_args()
 
@@ -877,15 +928,15 @@ Then the XML can be read and summarized or dumped to stdout.
             mail_dirname=mail_dirname, dest_dirname=dest_dirname,
             toaddr=toaddr)
 
-    elif args.command == 'dump':
-        # FIXME: don't use (only) ENV for these values..
-        report_dirname = os.environ['DMARC_REPORTDIR']
-        run_dump(report_dirname=report_dirname, args=args)
+    elif args.command in ('dump', 'summary'):
+        report_filenames = get_report_filenames(args.report)
+        args.dkim = args.dkim and parse_passfail(args.dkim)
+        args.spf = args.spf and parse_passfail(args.spf)
 
-    elif args.command == 'summary':
-        # FIXME: don't use (only) ENV for these values..
-        report_dirname = os.environ['DMARC_REPORTDIR']
-        run_summary(report_dirname=report_dirname, args=args)
+        if args.command == 'dump':
+            run_dump(report_filenames, args=args)
+        else:
+            run_summary(report_filenames, args=args)
 
     elif args.command is None:
         parser.print_usage()
