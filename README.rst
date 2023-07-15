@@ -42,9 +42,11 @@ They can now be parsed using ``dmarcsum.py summary`` or ``dmarcsum.py dump``.
     -      87 (    62)  10.20.30.40
     ...
 
+See the records, but only those that failed both DKIM and SPF:
+
 .. code-block:: console
 
-    $ dmarcsum.py dump -r ./reports-example.com
+    $ dmarcsum.py dump -r ./reports-example.com --dkim=fail --spf=fail
     ...
     2023-02-02+1d +DKIM -SPF count=2 env-from=<example.com> env-to=* hdr-from=<example.com> source=<1675395037.M25595P1620004.example.com,*#0>
     2023-02-03+1d +DKIM -SPF count=1 env-from=<example.com> env-to=* hdr-from=<example.com> source=<1675480249.M805978P2141872.example.com,*#0>
