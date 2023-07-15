@@ -722,7 +722,7 @@ def run_extract(mail_dirname, dest_dirname, toaddr, only_domain=None):
             if to is None or not to.strip():
                 warn(f'{email.filename!r} has no To header')
                 return False
-            assert to, (email.filename, to)  # 'None' for broken e-mail?
+            assert to, (email.filename, to)  # 'None' for broken email?
             if bin_toaddr not in to:
                 return False
 
@@ -737,6 +737,7 @@ def run_extract(mail_dirname, dest_dirname, toaddr, only_domain=None):
         assert toaddr in email.parsed['to'], email.parsed['to']
         return True
 
+    # By combining the listdir with is_candidate() we do something akin to:
     # find /var/mail/example.com/.INBOX/cur -type f | grep -l "To: $to_addr"
     filenames = os.listdir(mail_dirname)
     filenames.sort()
@@ -873,9 +874,9 @@ Commands:
 
 Environment variables required by the extract command:
 
-  DMARC_MAILDIR=/var/mail/example.com/jdoe/.DMARC/cur
-  DMARC_TOADDR=jdoe+rua@example.com
-  DMARC_REPORTDIR=./report-example.com
+  DMARC_MAILDIR=/var/mail/example.org/jdoe/.DMARC/cur
+  DMARC_TOADDR=jdoe+rua+example.com@example.org
+  DMARC_REPORTDIR=./reports-example.com
 
 If no -r/--report argument is supplied for the summary/dump commands, the
 DMARC_REPORTDIR is tried.

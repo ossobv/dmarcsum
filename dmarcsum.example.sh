@@ -4,7 +4,7 @@
 #offlineimap -l offlineimap.log -c offlineimaprc
 
 # Then run the tool (you can use sudo(1) do reach into /var/mail).
-DMARC_MAILDIR=/var/mail/example.com/jdoe/.DMARC-Reports/cur \
-DMARC_TOADDR=jdoe+dmarcreports@example.com \
+DMARC_MAILDIR=/var/mail/example.org/jdoe/.DMARC/cur \
+DMARC_TOADDR=jdoe+rua+example.com@example.org \
 DMARC_REPORTDIR=./reports-jdoe \
 ./dmarcsum.py "$@"
