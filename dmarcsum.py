@@ -347,6 +347,7 @@ class MailExtractor:
 
         with open(tmp_filename, mode='w', encoding='utf-8') as fp:
             sudo_chown(fp)
+            # Mega-expensive. But we do this only once..
             write_xml(fp, dom)
         os.utime(tmp_filename, (email.mtime, email.mtime))
 
@@ -395,14 +396,19 @@ class ReportRecord(namedtuple('RecordRecord', (
             env_from = '<>'
         elif env_from is None:
             env_from = '*'  # we don't know
+        elif env_from != '<>':
+            env_from = f'<{env_from}>'
 
         env_to = dom_record.findtext('identifiers/envelope_to')
         assert env_to != '*', report
         if env_to is None:
             env_to = '*'
+        else:
+            env_to = f'<{env_to}>'
 
         hdr_from = dom_record.findtext('identifiers/header_from')
         # XXX: assert hdr_from == report.domain, (hdr_from, report.domain)
+        hdr_from = f'<{hdr_from}>'
 
         return cls(
             source_file=report.name,
@@ -419,7 +425,36 @@ class ReportRecord(namedtuple('RecordRecord', (
             spf=spf_ok,
         )
 
-    # TODO: improve repr()/str() output by a lot..
+    def short_source(self):
+        # Assume the filename looks like:
+        # '1689143788.M238..example.com,outlook.com!...xml'
+        # Truncate to:
+        # '1689143788.M238..example.com,*'
+        # Add record index.
+        assert ',' in self.source_file, self.source_file
+        truncated_filename = self.source_file.split(",", 1)[0]
+        return f'{truncated_filename},*#{self.source_record}'
+
+    def human_period(self):
+        # We see the strangest date ranges, but usually it's 24 hours,
+        # generally from 00:00UTC to the next day.
+        # <date_range>
+        #   <begin>2023-07-13T00:00:03+0200 (1689199203)</begin>
+        #   <end>2023-07-14T00:00:05+0200 (1689285605)</end>
+        # </date_range>
+        period = self.period_begin.strftime("%Y-%m-%d")
+        duration = (self.period_end - self.period_begin).total_seconds()
+        days = int((duration + 86399) // 86400)
+        # A bit of a simplification, but good enough for our purposes.
+        return f'{period}+{days}d'
+
+    def as_short(self):
+        dkim = ('+DKIM' if self.dkim else '-DKIM')
+        spf = ('+SPF' if self.spf else '-SPF')
+        return (
+            f'{self.human_period()} {dkim} {spf} count={self.count} '
+            f'env_from={self.env_from} env_to={self.env_to} '
+            f'hdr_from={self.hdr_from} source=<{self.short_source()}>')
 
 
 class Report:
@@ -688,7 +723,7 @@ def _make_summary(report_dirname, args):
 def run_dump(report_dirname, args):
     summary = _make_summary(report_dirname, args)
     for record in summary._records:
-        print(record)
+        print(record.as_short())
 
 
 def run_summary(report_dirname, args):
