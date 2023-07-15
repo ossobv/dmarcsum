@@ -453,8 +453,8 @@ class ReportRecord(namedtuple('RecordRecord', (
         spf = ('+SPF' if self.spf else '-SPF')
         return (
             f'{self.human_period()} {dkim} {spf} count={self.count} '
-            f'env_from={self.env_from} env_to={self.env_to} '
-            f'hdr_from={self.hdr_from} source=<{self.short_source()}>')
+            f'env-from={self.env_from} env-to={self.env_to} '
+            f'hdr-from={self.hdr_from} source=<{self.short_source()}>')
 
 
 class Report:
@@ -621,14 +621,68 @@ class ReportSummary:
                     break
             print()
 
-        print(f'Dates: {self._period_begin} .. {self._period_end}')
-        print(f'Records: {len(self._records)}')
-        for title, items in (
-                (' DKIM& SPF', self._pass_dkim_spf),
-                (' DKIM&!SPF', self._pass_dkim),
-                ('!DKIM&!SPF', self._pass_spf),
-                ('!DKIM&!SPF', self._fail)):
-            print(f'{title}: {items.count:7d} ({len(items):6d})')
+        print('Stats:')
+        # Some reporters report bi-weekly instead of daily. This means that the
+        # --since and --until won't be exact.
+        print(f'- dates: {self._period_begin} .. {self._period_end}')
+        print('  (note: some reports can have coarse/wide date ranges)')
+        print('- volume: {c:6d} count ({r} records)'.format(
+            c=self._records.count, r=len(self._records)))
+
+        # Here we see hdr_from!=spf.domain -> SPF-alignment FAIL
+        # > <row>
+        # >   <source_ip>1.2.3.4</source_ip>
+        # >   <count>1</count>
+        # >   <policy_evaluated>
+        # >     <disposition>none</disposition>
+        # >     <dkim>pass</dkim>
+        # >     <spf>fail</spf>
+        # >   </policy_evaluated>
+        # > </row>
+        # > <identifiers>
+        # >   <header_from>example.com</header_from>
+        # > </identifiers>
+        # > <auth_results>
+        # >   <spf><domain>zohodesk.eu</domain><result>unknown</result></spf>
+        # >   <dkim><domain>example.com</domain><result>pass</result></dkim>
+        # > </auth_results>
+
+        # Here we see hdr_from==spf.domain -> SPF-alignment PASS
+        # Here we see hdr_from==dkim.domain -> DKIM-alignment PASS
+        # > <identifiers><header_from>example.com</header_from></identifiers>
+        # > <auth_results>
+        # >   <spf><domain>example.com</domain><result>pass</result></spf>
+        # >   <dkim><domain>example.com</domain><result>pass</result></dkim>
+        # > </auth_results>
+
+        # Additional stats TODO:
+        # SPF: auth-PASS auth-FAIL align-PASS align-FAIL policy-PASS
+        # DKIM: auth-PASS auth-FAIL align-PASS align-FAIL policy-PASS
+
+        # DMARC compliance: PASS FAIL
+        for title, pass_, fail, what in (
+                ('DMARC:  ',
+                 (self._pass_dkim_spf.count + self._pass_dkim.count +
+                  self._pass_spf.count),
+                 (self._fail.count),
+                 'compliance'),
+                ('DKIM:   ',
+                 (self._pass_dkim_spf.count + self._pass_dkim.count),
+                 (self._pass_spf.count + self._fail.count),
+                 'score'),
+                ('SPF:    ',
+                 (self._pass_dkim_spf.count + self._pass_spf.count),
+                 (self._pass_dkim.count + self._fail.count),
+                 'score'),
+                ('(both): ',
+                 (self._pass_dkim_spf.count),
+                 (self._pass_dkim.count + self._pass_spf.count +
+                  self._fail.count),
+                 'score')):
+            rate = (100 - round(fail * 100 / (pass_ + fail), 1))
+            print(
+                f'- {title}{pass_:6d} pass, {fail:6d} fail, '
+                f'{rate:5.1f}% {what}')
         print()
 
         print_dict('By organisation:', self._by_org)
