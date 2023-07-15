@@ -242,7 +242,7 @@ class MailExtractor:
 
         self._dest_dirname = dest_dirname
 
-    def extract(self, email):
+    def extract(self, email, only_domain):
         """
         Takes an EmailWrapper and saves the relevant attachments
         """
@@ -273,9 +273,11 @@ class MailExtractor:
         keep = set()
         try:
             for filename in files_written[:]:  # copy, because we mutate it
-                new_filename = self.unpack_attachment(email, filename)
+                new_filename, dom = self.unpack_attachment(email, filename)
                 files_written.append(new_filename)
-                keep.add(new_filename)
+                if (not only_domain or
+                        Report(dom, new_filename).domain == only_domain):
+                    keep.add(new_filename)
         except Exception:
             # Clean up everything. Let user restart processing from zero.
             warn(f'Cleaning all {files_written}')
@@ -352,7 +354,7 @@ class MailExtractor:
         os.utime(tmp_filename, (email.mtime, email.mtime))
 
         os.rename(tmp_filename, new_filename)
-        return new_filename
+        return new_filename, dom
 
 
 class ReportOrg(namedtuple('ReportOrg', 'org_suffix email_suffix')):
@@ -702,7 +704,7 @@ class ReportSummary:
                 print_dict(f'By {key}:', self._by_record[key])
 
 
-def run_extract(mail_dirname, dest_dirname, toaddr):
+def run_extract(mail_dirname, dest_dirname, toaddr, only_domain=None):
     extractor = MailExtractor(dest_dirname)
 
     already_extracted_staticnames = set(
@@ -751,7 +753,7 @@ def run_extract(mail_dirname, dest_dirname, toaddr):
         with open(mail_filename, 'rb') as fp:
             email = EmailWrapper.from_filename_fp(mail_filename, fp)
             if is_candidate(email):
-                extractor.extract(email)
+                extractor.extract(email, only_domain=only_domain)
 
         bar.update(idx)
     bar.finish()
@@ -882,12 +884,16 @@ DMARC_REPORTDIR is tried.
 
     parser_extract = subparsers.add_parser(
         'extract', help='Extract files from Maildir')
-    (parser_extract,)  # touch for PEP
     parser_dump = subparsers.add_parser(
         'dump', help='Parse DMARC XML reports and dump listing')
     parser_summary = subparsers.add_parser(
         'summary', help='Parse DMARC XML reports and show summary')
 
+    # Options for 'extract'
+    parser_extract.add_argument(
+        '--domain', help='extract files for this domain only')
+
+    # Options for 'summary' and 'dump'
     for command_that_parses in (parser_dump, parser_summary):
         command_that_parses.add_argument(
             '-r', '--report', action='append', help=(
@@ -926,7 +932,7 @@ DMARC_REPORTDIR is tried.
         dest_dirname = os.environ['DMARC_REPORTDIR']
         run_extract(
             mail_dirname=mail_dirname, dest_dirname=dest_dirname,
-            toaddr=toaddr)
+            toaddr=toaddr, only_domain=args.domain)
 
     elif args.command in ('dump', 'summary'):
         report_filenames = get_report_filenames(args.report)
