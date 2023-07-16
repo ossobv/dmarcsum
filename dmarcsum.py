@@ -377,7 +377,8 @@ class ReportOrg(namedtuple('ReportOrg', 'org_suffix email_suffix')):
 
 class ReportRecord(namedtuple('RecordRecord', (
         'source_file source_record org period_begin period_end count '
-        'source_ip env_from env_to hdr_from dkim spf'))):
+        'source_ip mfrom rcptto hfrom dkim dkim_dom dkim_sel dkim_res '
+        'spf'))):
     @classmethod
     def from_report_dom(cls, report, record_idx, dom_record):
         dkim_ok = dom_record.findtext('row/policy_evaluated/dkim')
@@ -394,28 +395,28 @@ class ReportRecord(namedtuple('RecordRecord', (
         count = int(dom_record.findtext('row/count'))
         assert count > 0, (report.name, count)
 
-        # Not sure when envelope_from is set. Various reports do not
-        # include this. We'll mark the env_from as '*' for now.
-        # For the empty env_from, we'll assume '<>'. Not sure if this is
-        # correct.
-        env_from = dom_record.findtext('identifiers/envelope_from')
-        if env_from == '':
-            env_from = '<>'
-        elif env_from is None:
-            env_from = '*'  # we don't know
-        elif env_from != '<>':
-            env_from = f'<{env_from}>'
+        hfrom = dom_record.findtext('identifiers/header_from')
+        # assert hfrom == report.domain, (hfrom, report.domain)
 
-        env_to = dom_record.findtext('identifiers/envelope_to')
-        assert env_to != '*', report
-        if env_to is None:
-            env_to = '*'
-        else:
-            env_to = f'<{env_to}>'
+        # There is always an <auth_results> with zero or more <spf> and <dkim>
+        # rows.
+        auth_results = list(dom_record.findall('auth_results'))
+        assert len(auth_results) == 1, auth_results
 
-        hdr_from = dom_record.findtext('identifiers/header_from')
-        # XXX: assert hdr_from == report.domain, (hdr_from, report.domain)
-        hdr_from = f'<{hdr_from}>'
+        # In <identifiers> there is <envelope_from/to> except when there is
+        # not..
+        mfrom = cls._deduce_mfrom(dom_record, auth_results[0], hfrom)
+        rcptto = dom_record.findtext('identifiers/envelope_to', '')
+
+        # Give us the DKIM best selector.
+        dkim_domain, dkim_selector, dkim_res = cls._extract_dkim(
+            dom_record, auth_results[0], hfrom)
+
+        # Some additional checks.
+        # spf_aligned = (mfrom == hfrom)
+        dkim_aligned = (dkim_domain == hfrom)
+        if dkim_aligned and dkim_res == 'pass' and not dkim_ok:
+            assert False, (report, dkim_aligned, dkim_res, dkim_ok)
 
         return cls(
             source_file=report.name,
@@ -425,12 +426,65 @@ class ReportRecord(namedtuple('RecordRecord', (
             period_end=report.period_end,
             count=count,
             source_ip=source_ip,
-            env_from=env_from,
-            env_to=env_to,
-            hdr_from=hdr_from,
+            mfrom=mfrom,
+            rcptto=rcptto,
+            hfrom=hfrom,
             dkim=dkim_ok,
+            dkim_dom=dkim_domain,
+            dkim_sel=dkim_selector,
+            dkim_res=dkim_res,
             spf=spf_ok,
         )
+
+    @classmethod
+    def _deduce_mfrom(cls, record, auth_results, hfrom):
+        mfrom = record.findtext('identifiers/envelope_from')
+        if mfrom:
+            # This could be a from-domain, or '<>' for bounces.
+            return ('' if mfrom == '<>' else mfrom)
+
+        # No (or empty?) <envelope_from>? Check the SPF records and see if we
+        # can find something there.
+        options = []
+        for spf in auth_results.findall('spf'):
+            domain = spf.findtext('domain')
+            options.append([
+                # scope can be in (None, 'helo', 'mfrom')
+                spf.findtext('scope') != 'mfrom',   # False is good
+                domain != hfrom,                    # False is good
+                spf.findtext('result') != 'pass',   # False is good
+                domain])
+
+        # scope=mfrom? domain-alignment? result-pass? [domain]
+        options.sort()  # <-- select best
+        domain = options[0][3]
+        assert isinstance(domain, str), (
+            ElementTree.tostring(record), options, domain)
+        return domain
+
+    @classmethod
+    def _extract_dkim(cls, record, auth_results, hfrom):
+        options = []
+        for dkim in auth_results.findall('dkim'):
+            domain = dkim.findtext('domain')
+            result = dkim.findtext('result')
+            options.append([
+                domain != hfrom,    # False is good
+                result != 'pass',   # False is good
+                domain,
+                dkim.findtext('selector') or '\xff',
+                result])            # HACK, see below
+
+        if not options:
+            return '', '', ''
+
+        # domain-alignment? result-pass? [domain] [dkim-selector] [dkim-result]
+        options.sort()  # <-- select best
+        domain, selector, result = (
+            options[0][2], options[0][3], options[0][4])
+        if selector == '\xff':
+            selector = ''  # 0xFF had it sort last..
+        return domain, selector, result
 
     def short_source(self):
         # Assume the filename looks like:
@@ -458,10 +512,25 @@ class ReportRecord(namedtuple('RecordRecord', (
     def as_short(self):
         dkim = ('+DKIM' if self.dkim else '-DKIM')
         spf = ('+SPF' if self.spf else '-SPF')
+
+        if self.dkim_dom == self.hfrom:
+            # We see 'temperror' in some cases, so when the message has valid
+            # DKIM we could see non-pass for dkim_res.
+            dkim_info = f's={self.dkim_sel},r={self.dkim_res}'
+        elif not self.dkim_dom:
+            dkim_info = '-'
+        else:
+            dkim_info = (
+                f'd={self.dkim_dom},s={self.dkim_sel},r={self.dkim_res}')
+
         return (
-            f'{self.human_period()} {dkim} {spf} count={self.count} '
-            f'env-from={self.env_from} env-to={self.env_to} '
-            f'hdr-from={self.hdr_from} source=<{self.short_source()}>')
+            f'{self.human_period()} {dkim} {spf} count={self.count}'
+            f' srcip={self.source_ip} mfrom=<{self.mfrom}>'
+            f' rcptto=<{self.rcptto}> hfrom=<{self.hfrom}>'
+            f' dkim={dkim_info}'
+            f' src=<{self.short_source()}>'
+            # f' org=<{self.org}>'
+        )
 
 
 class Report:
@@ -532,9 +601,9 @@ class ReportSummary:
         self._by_record = {
             'source-ip': dict_with_recordlists(),
             'known-ip': dict_with_recordlists(),
-            'env-from': dict_with_recordlists(),
-            'env-to': dict_with_recordlists(),
-            'hdr-from': dict_with_recordlists(),
+            'mfrom': dict_with_recordlists(),
+            'rcptto': dict_with_recordlists(),
+            'hfrom': dict_with_recordlists(),
         }
 
         self._pass_dkim_spf = recordlist()
@@ -619,9 +688,12 @@ class ReportSummary:
         self._by_record['source-ip'][record.source_ip].append(record)
         if known_ip is not None:
             self._by_record['known-ip'][known_ip].append(record)
-        self._by_record['env-from'][record.env_from].append(record)
-        self._by_record['env-to'][record.env_to].append(record)
-        self._by_record['hdr-from'][record.hdr_from].append(record)
+        # MFROM / Envelope-From / SMTP MAIL FROM / RFC5321.MailFrom
+        self._by_record['mfrom'][record.mfrom].append(record)
+        # RCPTTO / Envelop-To / SMTP RCPT TO / RFC5321.RcptTo
+        self._by_record['rcptto'][record.rcptto].append(record)
+        # From: header / RFC5322.From
+        self._by_record['hfrom'][record.hfrom].append(record)
         return True
 
     def print_summary(self):
@@ -637,7 +709,6 @@ class ReportSummary:
                 if idx >= 15:
                     print('- ...')
                     break
-            print()
 
         print('Stats:')
         # Some reporters report bi-weekly instead of daily. This means that the
@@ -647,7 +718,7 @@ class ReportSummary:
         print('- volume: {c:6d} count ({r} records)'.format(
             c=self._records.count, r=len(self._records)))
 
-        # Here we see hdr_from!=spf.domain -> SPF-alignment FAIL
+        # Here we see hfrom!=spf.domain -> SPF-alignment FAIL
         # > <row>
         # >   <source_ip>1.2.3.4</source_ip>
         # >   <count>1</count>
@@ -665,8 +736,8 @@ class ReportSummary:
         # >   <dkim><domain>example.com</domain><result>pass</result></dkim>
         # > </auth_results>
 
-        # Here we see hdr_from==spf.domain -> SPF-alignment PASS
-        # Here we see hdr_from==dkim.domain -> DKIM-alignment PASS
+        # Here we see hfrom==spf.domain -> SPF-alignment PASS
+        # Here we see hfrom==dkim.domain -> DKIM-alignment PASS
         # > <identifiers><header_from>example.com</header_from></identifiers>
         # > <auth_results>
         # >   <spf><domain>example.com</domain><result>pass</result></spf>
@@ -708,9 +779,15 @@ class ReportSummary:
         print()
 
         print_dict('By organisation:', self._by_org)
-        for key in ('source-ip', 'known-ip', 'env-from', 'env-to', 'hdr-from'):
+        print()
+        for key in ('source-ip', 'known-ip', 'mfrom', 'rcptto', 'hfrom'):
             if self._by_record[key]:
                 print_dict(f'By {key}:', self._by_record[key])
+                if key == 'mfrom':
+                    print('(note: The empty mfrom is generally a bounce)')
+                elif key == 'rcptto':
+                    print('(note: The empty rcptto is undefined)')
+                print()
 
 
 def run_extract(mail_dirname, dest_dirname, toaddr, only_domain=None):
@@ -926,7 +1003,7 @@ DMARC_REPORTDIR is tried.
             '--dkim', choices=('pass', 'fail'), help='only DKIM pass/fail')
         command_that_parses.add_argument(
             '--spf', choices=('pass', 'fail'), help='only SPF pass/fail')
-        # TODO: add more filters? --header-from? --domain? --env-from?
+        # TODO: add more filters? --header-from? --domain? --mfrom?
         # TODO: split up known-ip from source-ip. Allow multiple source-ip?
         command_that_parses.add_argument('--source-ip', type=str, help=(
             'only this exact source IP (or known-ip)'))  # str?
