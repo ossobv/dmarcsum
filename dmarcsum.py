@@ -362,12 +362,17 @@ class ReportOrg(namedtuple('ReportOrg', 'org_suffix email_suffix')):
     def from_report_dom(cls, report_dom):
         org_suffix = report_dom.findtext('report_metadata/org_name')
         if '.' in org_suffix and len(org_suffix.split('.', 2)) > 2:
-            org_suffix = '...' + '.'.join(org_suffix.rsplit('.', 2)[-2:])
+            org_suffix = '*' + '.'.join(org_suffix.rsplit('.', 2)[-2:])
 
         email_suffix = report_dom.findtext('report_metadata/email')
         email_suffix = email_suffix.rsplit('@', 1)[-1]
-        email_suffix = '...' + '.'.join(email_suffix.rsplit('.', 2)[-2:])
+        email_suffix = '*' + '.'.join(email_suffix.rsplit('.', 2)[-2:])
         return cls(org_suffix=org_suffix, email_suffix=email_suffix)
+
+    def __str__(self):
+        if self.org_suffix == self.email_suffix:
+            return f'[{self.org_suffix}]'
+        return f'[{self.org_suffix}]({self.email_suffix})'
 
 
 class ReportRecord(namedtuple('RecordRecord', (
