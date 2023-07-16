@@ -697,10 +697,14 @@ class ReportSummary:
                  (self._pass_dkim.count + self._pass_spf.count +
                   self._fail.count),
                  'score')):
-            rate = (100 - round(fail * 100 / (pass_ + fail), 1))
+            if pass_ + fail:
+                rate = '{:5.1f}%'.format(
+                    100 - round(fail * 100 / (pass_ + fail), 1))
+            else:
+                rate = '    -%'
             print(
                 f'- {title}{pass_:6d} pass, {fail:6d} fail, '
-                f'{rate:5.1f}% {what}')
+                f'{rate} {what}')
         print()
 
         print_dict('By organisation:', self._by_org)
