@@ -430,7 +430,13 @@ class ReportRecord(namedtuple('RecordRecord', (
         # spf_aligned = (mfrom == hfrom)
         dkim_aligned = (dkim_domain == hfrom)
         if dkim_aligned and dkim_res == 'pass' and not dkim_ok:
-            assert False, (report, dkim_aligned, dkim_res, dkim_ok)
+            xml_record = ElementTree.tostring(dom_record).decode('utf-8')
+            warn(
+                f'Unexpected DKIM fail (we passed?) in {report.name} '
+                f'record #{record_idx}:\n{xml_record}')
+            # Seen only once. Might have been an issue where our DMARC record
+            # was improperly formatted..
+            assert False, (report, record_idx, dkim_aligned, dkim_res, dkim_ok)
 
         return cls(
             source_file=report.name,
