@@ -8,7 +8,7 @@ from collections import defaultdict, namedtuple
 from datetime import datetime
 from email import message_from_binary_file
 from ipaddress import ip_network
-from io import StringIO
+from io import BytesIO, StringIO
 from mimetypes import guess_type
 from xml.dom import minidom
 from xml.etree import ElementTree
@@ -16,6 +16,10 @@ from yaml import safe_load
 from zipfile import BadZipFile, ZipFile
 
 from progressbar import ProgressBar
+
+
+class UnpackError(Exception):
+    pass
 
 
 class WARN(UserWarning):
@@ -342,8 +346,18 @@ class MailExtractor:
             assert False, (email, filename, mime, encoding)
 
         try:
-            # Somewhat expensive. But a good check..
-            dom = ElementTree.parse(fp)
+            try:
+                # Somewhat expensive. But a good check..
+                dom = ElementTree.parse(fp)
+            except gzip.BadGzipFile:
+                # Incident: the file contained trailing CRLF in mail sent from
+                # mimecast.org: gzip.BadGzipFile: Not a gzipped file (b'\r\n')
+                fp.close()
+                fp = open(filename, 'rb')
+                data = gzip.decompress(fp.read().rstrip(b'\r\n\t '))
+                dom = ElementTree.parse(BytesIO(data))
+        except Exception as e:
+            raise UnpackError(email, filename) from e
         finally:
             fp.close()
 
