@@ -513,7 +513,7 @@ class ReportRecord(namedtuple('RecordRecord', (
         # '1689143788.M238..example.com,*'
         # Add record index.
         assert ',' in self.source_file, self.source_file
-        truncated_filename = self.source_file.split(",", 1)[0]
+        truncated_filename = self.source_file.split(',', 1)[0]
         return f'{truncated_filename},*#{self.source_record}'
 
     def human_period(self):
@@ -523,7 +523,7 @@ class ReportRecord(namedtuple('RecordRecord', (
         #   <begin>2023-07-13T00:00:03+0200 (1689199203)</begin>
         #   <end>2023-07-14T00:00:05+0200 (1689285605)</end>
         # </date_range>
-        period = self.period_begin.strftime("%Y-%m-%d")
+        period = self.period_begin.strftime('%Y-%m-%d')
         duration = (self.period_end - self.period_begin).total_seconds()
         days = int((duration + 86399) // 86400)
         # A bit of a simplification, but good enough for our purposes.

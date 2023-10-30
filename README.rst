@@ -5,7 +5,7 @@ dmarcsum CLI to bulk analyze DMARC aggregate reports
 and quickly sift through thousands of reports.*
 
 If you're like me, you may have enabled *DMARC* on your maildomain, but
-delayed looking at the reports send by *Outlook* and *Gmail*. This tool
+delayed looking at the reports sent by *Outlook* and *Gmail*. This tool
 aids in making sense of those reports.
 
 
