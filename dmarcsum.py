@@ -3,7 +3,9 @@ import gzip
 import os
 import sys
 import warnings
+
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
+from configparser import ConfigParser
 from collections import defaultdict, namedtuple
 from datetime import datetime
 from email import message_from_binary_file
@@ -12,7 +14,6 @@ from io import BytesIO, StringIO
 from mimetypes import guess_type
 from xml.dom import minidom
 from xml.etree import ElementTree
-from yaml import safe_load
 from zipfile import BadZipFile, ZipFile
 
 from progressbar import ProgressBar
@@ -872,8 +873,18 @@ def _make_summary(filenames, args):
     summary = ReportSummary(domain=args.domain)
 
     if args.config:
-        with open(args.config) as fp:
-            summary.set_known_ips(safe_load(fp)['known_ips'])
+        # [known_ip:SomeProvider]
+        # 1.2.3.0/24
+        # 1.2.4.0/24
+        ini = ConfigParser(
+            delimiters=('=',), allow_no_value=True,
+            inline_comment_prefixes=('#', ';'))
+        ini.read(args.config)
+        summary.set_known_ips({
+            host[9:]: [x for x, _ in ini.items(host)]
+            for host in ini.sections()
+            if host == 'known_ip' or host.startswith('known_ip:')
+        })
 
     print('Parsing:')
     # TODO: disable progressbar if stdout is not a tty?
@@ -1009,9 +1020,9 @@ DMARC_REPORTDIR is tried.
                 'the DMARC_REPORTDIR env is tried'))
         command_that_parses.add_argument(
             '--config', type=str, help=(
-                'path to optional configuration YAML; shall contain a '
-                '"known_ips" key with a dictionary of names and IP-networks. '
-                'this list will be consulted to populate the "known-ip" '
+                'path to optional ini configuration; shall contain '
+                'sections [known_ip:NAME] with keys of IP-networks. '
+                'This list will be consulted to populate the "known-ip" '
                 'field'))
         command_that_parses.add_argument('--domain', help=(
             'select specific domain; needed when multiple comains are found '
@@ -1028,7 +1039,7 @@ DMARC_REPORTDIR is tried.
         # TODO: split up known-ip from source-ip. Allow multiple source-ip?
         command_that_parses.add_argument('--source-ip', type=str, help=(
             'only this exact source IP (or known-ip)'))  # str?
-        # YAML with 'known_ips: {"name": [ip1, ip2, ip3]}'
+        # INI with '[known_ip:NAME]\nNet1\nNet2\n...'
         # TODO: this needs documentation
 
     args = parser.parse_args()
