@@ -609,7 +609,8 @@ class ReportSummary:
                 super().extend(records)
                 self.count += sum(i.count for i in records)
 
-        dict_with_recordlists = (lambda: defaultdict(recordlist))
+        def dict_with_recordlists():
+            return defaultdict(recordlist)
 
         self._known_ips = {}
         self._period_begin = datetime(2038, 1, 1)
