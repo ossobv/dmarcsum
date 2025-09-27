@@ -375,11 +375,11 @@ class MailExtractor:
 class ReportOrg(namedtuple('ReportOrg', 'org_suffix email_suffix')):
     @classmethod
     def from_report_dom(cls, report_dom):
-        org_suffix = report_dom.findtext('report_metadata/org_name')
+        org_suffix = report_dom.findtext('{*}report_metadata/{*}org_name')
         if '.' in org_suffix and len(org_suffix.split('.', 2)) > 2:
             org_suffix = '*' + '.'.join(org_suffix.rsplit('.', 2)[-2:])
 
-        email_suffix = report_dom.findtext('report_metadata/email')
+        email_suffix = report_dom.findtext('{*}report_metadata/{*}email')
         email_suffix = email_suffix.rsplit('@', 1)[-1]
         email_suffix = '*' + '.'.join(email_suffix.rsplit('.', 2)[-2:])
         return cls(org_suffix=org_suffix, email_suffix=email_suffix)
@@ -396,32 +396,32 @@ class ReportRecord(namedtuple('RecordRecord', (
         'spf'))):
     @classmethod
     def from_report_dom(cls, report, record_idx, dom_record):
-        dkim_ok = dom_record.findtext('row/policy_evaluated/dkim')
+        dkim_ok = dom_record.findtext('{*}row/{*}policy_evaluated/{*}dkim')
         assert dkim_ok in ('pass', 'fail'), (report.name, dkim_ok)
         dkim_ok = (dkim_ok == 'pass')
 
-        spf_ok = dom_record.findtext('row/policy_evaluated/spf')
+        spf_ok = dom_record.findtext('{*}row/{*}policy_evaluated/{*}spf')
         assert spf_ok in ('pass', 'fail'), (report.name, spf_ok)
         spf_ok = (spf_ok == 'pass')
 
-        source_ip = dom_record.findtext('row/source_ip')
+        source_ip = dom_record.findtext('{*}row/{*}source_ip')
         assert source_ip, (report.name, source_ip)
 
-        count = int(dom_record.findtext('row/count'))
+        count = int(dom_record.findtext('{*}row/{*}count'))
         assert count > 0, (report.name, count)
 
-        hfrom = dom_record.findtext('identifiers/header_from')
+        hfrom = dom_record.findtext('{*}identifiers/{*}header_from')
         # assert hfrom == report.domain, (hfrom, report.domain)
 
         # There is always an <auth_results> with zero or more <spf> and <dkim>
         # rows.
-        auth_results = list(dom_record.findall('auth_results'))
+        auth_results = list(dom_record.findall('{*}auth_results'))
         assert len(auth_results) == 1, auth_results
 
         # In <identifiers> there is <envelope_from/to> except when there is
         # not..
         mfrom = cls._deduce_mfrom(dom_record, auth_results[0], hfrom)
-        rcptto = dom_record.findtext('identifiers/envelope_to', '')
+        rcptto = dom_record.findtext('{*}identifiers/{*}envelope_to', '')
 
         # Give us the DKIM best selector.
         dkim_domain, dkim_selector, dkim_res = cls._extract_dkim(
@@ -459,7 +459,7 @@ class ReportRecord(namedtuple('RecordRecord', (
 
     @classmethod
     def _deduce_mfrom(cls, record, auth_results, hfrom):
-        mfrom = record.findtext('identifiers/envelope_from')
+        mfrom = record.findtext('{*}identifiers/{*}envelope_from')
         if mfrom:
             # This could be a from-domain, or '<>' for bounces.
             return ('' if mfrom == '<>' else mfrom)
@@ -467,13 +467,13 @@ class ReportRecord(namedtuple('RecordRecord', (
         # No (or empty?) <envelope_from>? Check the SPF records and see if we
         # can find something there.
         options = []
-        for spf in auth_results.findall('spf'):
-            domain = spf.findtext('domain')
+        for spf in auth_results.findall('{*}spf'):
+            domain = spf.findtext('{*}domain')
             options.append([
                 # scope can be in (None, 'helo', 'mfrom')
-                spf.findtext('scope') != 'mfrom',   # False is good
+                spf.findtext('{*}scope') != 'mfrom',   # False is good
                 domain != hfrom,                    # False is good
-                spf.findtext('result') != 'pass',   # False is good
+                spf.findtext('{*}result') != 'pass',   # False is good
                 domain])
 
         # scope=mfrom? domain-alignment? result-pass? [domain]
@@ -486,14 +486,14 @@ class ReportRecord(namedtuple('RecordRecord', (
     @classmethod
     def _extract_dkim(cls, record, auth_results, hfrom):
         options = []
-        for dkim in auth_results.findall('dkim'):
-            domain = dkim.findtext('domain')
-            result = dkim.findtext('result')
+        for dkim in auth_results.findall('{*}dkim'):
+            domain = dkim.findtext('{*}domain')
+            result = dkim.findtext('{*}result')
             options.append([
                 domain != hfrom,    # False is good
                 result != 'pass',   # False is good
                 domain,
-                dkim.findtext('selector') or '\xff',
+                dkim.findtext('{*}selector') or '\xff',
                 result])            # HACK, see below
 
         if not options:
@@ -565,7 +565,7 @@ class Report:
         self._dom = dom
         self.name = name
         self.org = ReportOrg.from_report_dom(dom)
-        self.domain = dom.findtext('policy_published/domain')
+        self.domain = dom.findtext('{*}policy_published/{*}domain')
         assert self.domain, (name, self.domain)
         self._period_begin = None
         self._period_end = None
@@ -574,18 +574,20 @@ class Report:
     def period_begin(self):
         if self._period_begin is None:
             self._period_begin = datetime.fromtimestamp(int(
-                self._dom.findtext('report_metadata/date_range/begin')))
+                self._dom.findtext(
+                    '{*}report_metadata/{*}date_range/{*}begin')))
         return self._period_begin
 
     @property
     def period_end(self):
         if self._period_end is None:
             self._period_end = datetime.fromtimestamp(int(
-                self._dom.findtext('report_metadata/date_range/end')))
+                self._dom.findtext(
+                    '{*}report_metadata/{*}date_range/{*}end')))
         return self._period_end
 
     def get_records(self):
-        records = self._dom.findall('record')
+        records = self._dom.findall('{*}record')
 
         for idx, record in enumerate(records):
             record = ReportRecord.from_report_dom(self, idx, record)
